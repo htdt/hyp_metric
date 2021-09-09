@@ -84,9 +84,8 @@ def eval_model(model, ds_name, hyp_c=None):
     eval_tr = T.Compose(
         [
             T.Resize(256, interpolation=T.InterpolationMode.BICUBIC),
-            # T.CenterCrop(224),
-            T.FiveCrop(224),
-            T.Lambda(lambda crops: torch.stack([T.ToTensor()(c) for c in crops])),
+            T.CenterCrop(224),
+            T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
