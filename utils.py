@@ -1,14 +1,13 @@
-from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
-import torchvision.transforms.functional as TF
 from torch.utils.data import DataLoader
 from proxy_anchor.dataset import SOP, CUBirds
-from proxy_anchor.utils import evaluate_cos, evaluate_cos_SOP
-from proxy_anchor.utils import predict_batchwise, calc_recall_at_k
+from proxy_anchor.utils import calc_recall_at_k
 from hyptorch.pmath import dist_matrix
+import PIL
+import multiprocessing
 
 
 class MultiSample:
@@ -20,61 +19,68 @@ class MultiSample:
         return tuple(self.transform(x) for _ in range(self.num))
 
 
-def evaluate_hyp(model, dataloader, hyp_c, k_list=[1]):
-    X, T = predict_batchwise(model, dataloader)
-    dist_m = torch.empty(len(X), len(X), device="cuda")
-    for i in range(len(X)):
-        dist_m[i : i + 1] = dist_matrix(X[i : i + 1], X, hyp_c)
-    Y = T[dist_m.topk(1 + 32, largest=False)[1][:, 1:]]
-    Y = Y.float().cpu()
-    recall = [calc_recall_at_k(T, Y, k) for k in k_list]
-    print(recall)
-    return recall
-
-
-class PadIfNeeded(torch.nn.Module):
-    def forward(self, img):
-        w, h = TF._get_image_size(img)
-        if w < 224 or h < 224:
-            padding = [max(0, 224 - w), max(0, 224 - h)]
-            img = TF.pad(img, padding, 0, "edge")
-        return img
-
-
-def eval_model(model, ds_name, path, hyp_c=0):
+def get_recall(x, y, ds_name, hyp_c):
     if ds_name == "CUB":
-        ds = CUBirds
-        eval_f = evaluate_cos
         k_list = [1, 2, 4, 8, 16, 32]
     elif ds_name == "SOP":
-        ds = SOP
-        eval_f = evaluate_cos_SOP
         k_list = [1, 10, 100, 1000]
 
     if hyp_c > 0:
-        eval_f = partial(evaluate_hyp, hyp_c=hyp_c, k_list=k_list)
+        dist_m = torch.empty(len(x), len(x), device="cuda")
+        for i in range(len(x)):
+            dist_m[i : i + 1] = dist_matrix(x[i : i + 1], x, hyp_c)
+    else:
+        dist_m = x @ x.T
 
+    y_cur = y[dist_m.topk(1 + max(k_list), largest=(hyp_c == 0))[1][:, 1:]]
+    y = y.cpu()
+    y_cur = y_cur.float().cpu()
+    recall = [calc_recall_at_k(y, y_cur, k) for k in k_list]
+    print(recall)
+    return recall[0]
+
+
+def get_eval_emb(model, ds_name, path, world_size=1):
+    ds_f = {"CUB": CUBirds, "SOP": SOP}
     eval_tr = T.Compose(
         [
-            T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
+            T.Resize(224, interpolation=PIL.Image.BICUBIC),
             T.CenterCrop(224),
             T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
         ]
     )
-    ds_eval = ds(path, "eval", eval_tr)
+    ds_eval = ds_f[ds_name](path, "eval", eval_tr)
+    sampler = torch.utils.data.distributed.DistributedSampler(ds_eval)
     dl_eval = DataLoader(
         dataset=ds_eval,
         batch_size=100,
         shuffle=False,
-        num_workers=8,
-        pin_memory=False,
+        num_workers=multiprocessing.cpu_count() // world_size,
+        pin_memory=True,
         drop_last=False,
+        sampler=sampler,
     )
     model.eval()
-    r = eval_f(model, dl_eval)
+    x, y = eval_dataset(model, dl_eval)
+    y = y.cuda()
+    all_x = [torch.zeros_like(x) for _ in range(world_size)]
+    all_y = [torch.zeros_like(y) for _ in range(world_size)]
+    torch.distributed.all_gather(all_x, x)
+    torch.distributed.all_gather(all_y, y)
+    x, y = torch.cat(all_x), torch.cat(all_y)
     model.train()
-    return r[0]
+    return x, y
+
+
+def eval_dataset(model, dl):
+    all_x, all_y = [], []
+    for x, y in dl:
+        with torch.no_grad():
+            x = x.cuda(non_blocking=True)
+            all_x.append(model(x))
+        all_y.append(y)
+    return torch.cat(all_x), torch.cat(all_y)
 
 
 def freeze_model(model, num_block):

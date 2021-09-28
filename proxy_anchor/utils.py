@@ -69,11 +69,7 @@ def proxy_init_calc(model, dataloader):
 
     return proxy_mean
 
-def evaluate_cos(model, dataloader, normalize=False):
-    nb_classes = dataloader.dataset.nb_classes()
-
-    # calculate embeddings with model and get targets
-    X, T = predict_batchwise(model, dataloader)
+def evaluate_cos(X, T, normalize=False):
     if normalize:
         X = l2_norm(X)
 
@@ -136,11 +132,7 @@ def evaluate_cos_Inshop(model, query_dataloader, gallery_dataloader, normalize=F
                 
     return recall
 
-def evaluate_cos_SOP(model, dataloader, normalize=False):
-    nb_classes = dataloader.dataset.nb_classes()
-    
-    # calculate embeddings with model and get targets
-    X, T = predict_batchwise(model, dataloader)
+def evaluate_cos_SOP(X, T, normalize=False):
     if normalize:
         X = l2_norm(X)
     
