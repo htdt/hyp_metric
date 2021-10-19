@@ -14,17 +14,34 @@ import wandb
 import timm
 import multiprocessing
 from functools import partial
-import pickle
 import numpy as np
-import os
 import PIL
+from tap import Tap
+from typing_extensions import Literal
 
 from sampler import UniqueClassSempler
-from utils import get_eval_emb, get_recall, freeze_model, NormLayer
+from helpers import get_emb, get_recall, freeze_model, NormLayer, HeadSwitch
 from proxy_anchor.dataset import CUBirds, SOP
 import hyptorch.nn as hypnn
 from hyptorch.pmath import dist_matrix
-from cfg import get_cfg
+
+
+class Config(Tap):
+    path: str = "/home/i"
+    ds: Literal["SOP", "CUB"] = "SOP"
+    num_samples: int = 2
+    bs: int = 400  # per GPU
+    lr: float = 1e-5
+    t: float = 0.3
+    emb: int = 128
+    freeze: int = None
+    ep: int = 10
+    hyp_c: float = 0.1
+    eval_ep: int = 10
+    model: str = "dino_vits16"
+    save_emb: bool = False
+    emb_name: str = "emb"
+    local_rank: int = 0
 
 
 def contrastive_loss(x0, x1, tau, hyp_c):
@@ -50,9 +67,9 @@ def contrastive_loss(x0, x1, tau, hyp_c):
 
 
 if __name__ == "__main__":
-    cfg = get_cfg()
+    cfg: Config = Config().parse_args()
     if cfg.local_rank == 0:
-        wandb.init(project="hyp_metric", config=cfg)
+        wandb.init(project="hyp_metric", config=cfg.as_dict())
 
     torch.cuda.set_device(cfg.local_rank)
     torch.distributed.init_process_group(backend="nccl", init_method="env://")
@@ -63,19 +80,17 @@ if __name__ == "__main__":
             T.RandomResizedCrop(224, scale=(0.2, 1.0), interpolation=PIL.Image.BICUBIC),
             T.RandomHorizontalFlip(),
             T.ToTensor(),
-            T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            # T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ]
     )
 
     ds_f = {"CUB": CUBirds, "SOP": SOP}
     ds_train = ds_f[cfg.ds](cfg.path, "train", train_tr)
-    lbl_fname = cfg.path + "/" + cfg.ds + "_labels.pickle"
-    if os.path.isfile(lbl_fname):
-        lbl = pickle.load(open(lbl_fname, "rb"))
-    else:
-        lbl = [x[1] for x in ds_train]
-        pickle.dump(lbl, open(lbl_fname, "wb"))
-    sampler = UniqueClassSempler(lbl, 2, cfg.local_rank, world_size)
+    assert len(ds_train.ys) * cfg.num_samples >= cfg.bs * world_size
+    sampler = UniqueClassSempler(
+        ds_train.ys, cfg.num_samples, cfg.local_rank, world_size
+    )
     dl_train = DataLoader(
         dataset=ds_train,
         sampler=sampler,
@@ -84,20 +99,28 @@ if __name__ == "__main__":
         pin_memory=True,
         drop_last=True,
     )
+    if cfg.local_rank == 0:
+        print(f"iter per epoch: {len(dl_train)}")
 
-    model = timm.create_model(cfg.model, pretrained=True)
+    if cfg.model.startswith("dino"):
+        body = torch.hub.load("facebookresearch/dino:main", cfg.model)
+    else:
+        body = timm.create_model(cfg.model, pretrained=True)
+
     if cfg.hyp_c > 0:
         last = hypnn.ToPoincare(c=cfg.hyp_c, ball_dim=cfg.emb, riemannian=False)
     else:
         last = NormLayer()
-    model.head = nn.Sequential(nn.Linear(model.head.in_features, cfg.emb), last)
+    head = nn.Sequential(nn.Linear(384, cfg.emb), last)
+    body.head = nn.Identity()
     if cfg.freeze is not None:
-        freeze_model(model, cfg.freeze)
+        freeze_model(body, cfg.freeze)
+    model = HeadSwitch(body, head)
     model = apex.parallel.convert_syncbn_model(model)
     model.cuda().train()
 
     optimizer = optim.AdamW(model.parameters(), lr=cfg.lr)
-    model, optimizer = amp.initialize(model, optimizer, opt_level="O2")
+    model, optimizer = amp.initialize(model, optimizer, opt_level="O2", loss_scale=16.0)
     model = DistributedDataParallel(model, delay_allreduce=True)
 
     loss_f = partial(contrastive_loss, tau=cfg.t, hyp_c=cfg.hyp_c)
@@ -107,42 +130,49 @@ if __name__ == "__main__":
         sampler.set_epoch(ep)
         stats_ep = []
         for x, y in dl_train:
-            y = y.view(len(y) // 2, 2)
-            assert (y[:, 0] == y[:, 1]).all()
+            y = y.view(len(y) // cfg.num_samples, cfg.num_samples)
+            assert (y[:, 0] == y[:, -1]).all()
             s = y[:, 0].tolist()
             assert len(set(s)) == len(s)
 
             x = x.cuda(non_blocking=True)
-            z = model(x).view(len(x) // 2, 2, cfg.emb)
+            z = model(x).view(len(x) // cfg.num_samples, cfg.num_samples, cfg.emb)
             with torch.no_grad():
                 all_z = [torch.zeros_like(z) for _ in range(world_size)]
                 torch.distributed.all_gather(all_z, z)
             all_z[cfg.local_rank] = z
             z = torch.cat(all_z)
-            loss0, stats0 = loss_f(z[:, 0], z[:, 1])
-            loss1, stats1 = loss_f(z[:, 1], z[:, 0])
+            loss = 0
+            for i in range(cfg.num_samples):
+                for j in range(cfg.num_samples):
+                    if i != j:
+                        l, s = loss_f(z[:, i], z[:, j])
+                        loss += l
+                        stats_ep.append({**s, "loss": l.item()})
 
             optimizer.zero_grad()
-            with amp.scale_loss(loss0 + loss1, optimizer) as scaled_loss:
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
-            # torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 3)
+            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 3)
             optimizer.step()
-            stats_ep.append({**stats0, "loss": loss0.item()})
-            stats_ep.append({**stats1, "loss": loss1.item()})
 
         if (ep + 1) % cfg.eval_ep == 0:
-            eval_data = get_eval_emb(model, cfg.ds, cfg.path, world_size)
+            eval_head = get_emb(model, cfg.ds, cfg.path, "eval", world_size)
+            eval_body = get_emb(model, cfg.ds, cfg.path, "eval", world_size, True)
 
         if cfg.local_rank == 0:
             stats_ep = {k: np.mean([x[k] for x in stats_ep]) for k in stats_ep[0]}
             if (ep + 1) % cfg.eval_ep == 0:
-                recall = get_recall(*eval_data, cfg.ds, cfg.hyp_c)
-                stats_ep = {"recall": recall, **stats_ep}
+                recall_head = get_recall(*eval_head, cfg.ds, cfg.hyp_c)
+                recall_body = get_recall(*eval_body, cfg.ds, 0)
+                stats_ep = {"recall": recall_head, "recall_b": recall_body, **stats_ep}
             wandb.log({**stats_ep, "ep": ep})
 
-    # model.head = NormLayer()
-    # eval_data = get_eval_emb(model, cfg.ds, cfg.path, world_size)
-    # print(eval_data[0].shape, eval_data[1].shape)
-    # if cfg.local_rank == 0:
-    #     recall = get_recall(*eval_data, cfg.ds, 0)
-    #     wandb.log({"recall_b": recall})
+    if cfg.save_emb:
+        x, y = get_emb(model, cfg.ds, cfg.path, "eval", world_size)
+        x, y = x.float().cpu(), y.long().cpu()
+        torch.save((x, y), cfg.path + "/" + cfg.emb_name + "_eval.pt")
+
+        x, y = get_emb(model, cfg.ds, cfg.path, "train", world_size)
+        x, y = x.float().cpu(), y.long().cpu()
+        torch.save((x, y), cfg.path + "/" + cfg.emb_name + "_train.pt")

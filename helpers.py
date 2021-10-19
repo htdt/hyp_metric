@@ -40,18 +40,22 @@ def get_recall(x, y, ds_name, hyp_c):
     return recall[0]
 
 
-def get_eval_emb(model, ds_name, path, world_size=1):
+def get_emb(model, ds_name, path, ds_type="eval", world_size=1, skip_head=False):
     ds_f = {"CUB": CUBirds, "SOP": SOP}
     eval_tr = T.Compose(
         [
             T.Resize(224, interpolation=PIL.Image.BICUBIC),
             T.CenterCrop(224),
             T.ToTensor(),
-            T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            # T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ]
     )
-    ds_eval = ds_f[ds_name](path, "eval", eval_tr)
-    sampler = torch.utils.data.distributed.DistributedSampler(ds_eval)
+    ds_eval = ds_f[ds_name](path, ds_type, eval_tr)
+    if world_size == 1:
+        sampler = None
+    else:
+        sampler = torch.utils.data.distributed.DistributedSampler(ds_eval)
     dl_eval = DataLoader(
         dataset=ds_eval,
         batch_size=100,
@@ -62,23 +66,24 @@ def get_eval_emb(model, ds_name, path, world_size=1):
         sampler=sampler,
     )
     model.eval()
-    x, y = eval_dataset(model, dl_eval)
+    x, y = eval_dataset(model, dl_eval, skip_head)
     y = y.cuda()
-    all_x = [torch.zeros_like(x) for _ in range(world_size)]
-    all_y = [torch.zeros_like(y) for _ in range(world_size)]
-    torch.distributed.all_gather(all_x, x)
-    torch.distributed.all_gather(all_y, y)
-    x, y = torch.cat(all_x), torch.cat(all_y)
+    if world_size > 1:
+        all_x = [torch.zeros_like(x) for _ in range(world_size)]
+        all_y = [torch.zeros_like(y) for _ in range(world_size)]
+        torch.distributed.all_gather(all_x, x)
+        torch.distributed.all_gather(all_y, y)
+        x, y = torch.cat(all_x), torch.cat(all_y)
     model.train()
     return x, y
 
 
-def eval_dataset(model, dl):
+def eval_dataset(model, dl, skip_head):
     all_x, all_y = [], []
     for x, y in dl:
         with torch.no_grad():
             x = x.cuda(non_blocking=True)
-            all_x.append(model(x))
+            all_x.append(model(x, skip_head=skip_head))
         all_y.append(y)
     return torch.cat(all_x), torch.cat(all_y)
 
@@ -97,3 +102,19 @@ def freeze_model(model, num_block):
 class NormLayer(nn.Module):
     def forward(self, x):
         return F.normalize(x, p=2, dim=1)
+
+
+class HeadSwitch(nn.Module):
+    def __init__(self, body, head):
+        super(HeadSwitch, self).__init__()
+        self.body = body
+        self.head = head
+        self.norm = NormLayer()
+
+    def forward(self, x, skip_head=False):
+        x = self.body(x)
+        if not skip_head:
+            x = self.head(x)
+        else:
+            x = self.norm(x)
+        return x
