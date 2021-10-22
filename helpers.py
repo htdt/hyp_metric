@@ -1,9 +1,6 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
-from proxy_anchor.dataset import SOP, CUBirds
 from proxy_anchor.utils import calc_recall_at_k
 from hyptorch.pmath import dist_matrix
 import PIL
@@ -40,18 +37,16 @@ def get_recall(x, y, ds_name, hyp_c):
     return recall[0]
 
 
-def get_emb(model, ds_name, path, ds_type="eval", world_size=1, skip_head=False):
-    ds_f = {"CUB": CUBirds, "SOP": SOP}
+def get_emb(model, ds, path, mean_std, ds_type="eval", world_size=1, skip_head=False):
     eval_tr = T.Compose(
         [
             T.Resize(224, interpolation=PIL.Image.BICUBIC),
             T.CenterCrop(224),
             T.ToTensor(),
-            # T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-            T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            T.Normalize(*mean_std),
         ]
     )
-    ds_eval = ds_f[ds_name](path, ds_type, eval_tr)
+    ds_eval = ds(path, ds_type, eval_tr)
     if world_size == 1:
         sampler = None
     else:
@@ -86,35 +81,3 @@ def eval_dataset(model, dl, skip_head):
             all_x.append(model(x, skip_head=skip_head))
         all_y.append(y)
     return torch.cat(all_x), torch.cat(all_y)
-
-
-def freeze_model(model, num_block):
-    def fr(m):
-        for param in m.parameters():
-            param.requires_grad = False
-
-    fr(model.patch_embed)
-    fr(model.pos_drop)
-    for i in range(num_block):
-        fr(model.blocks[i])
-
-
-class NormLayer(nn.Module):
-    def forward(self, x):
-        return F.normalize(x, p=2, dim=1)
-
-
-class HeadSwitch(nn.Module):
-    def __init__(self, body, head):
-        super(HeadSwitch, self).__init__()
-        self.body = body
-        self.head = head
-        self.norm = NormLayer()
-
-    def forward(self, x, skip_head=False):
-        x = self.body(x)
-        if not skip_head:
-            x = self.head(x)
-        else:
-            x = self.norm(x)
-        return x
