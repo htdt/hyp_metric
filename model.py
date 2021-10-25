@@ -15,7 +15,8 @@ def init_model(cfg):
     else:
         last = NormLayer()
     bdim = 2048 if cfg.model == "resnet50" else 384
-    head = nn.Sequential(nn.Linear(bdim, cfg.emb, bias=False), last)
+    head = nn.Sequential(nn.Linear(bdim, cfg.emb), last)
+    nn.init.constant_(head[0].bias.data, 0)
     nn.init.orthogonal_(head[0].weight.data)
     rm_head(body)
     if cfg.freeze is not None:

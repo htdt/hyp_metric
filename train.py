@@ -15,31 +15,32 @@ from functools import partial
 import numpy as np
 import PIL
 from tap import Tap
+from typing import List
 from typing_extensions import Literal
 
 from sampler import UniqueClassSempler
-from helpers import get_emb, get_recall
-from proxy_anchor.dataset import CUBirds, SOP
+from helpers import get_emb, evaluate
+from proxy_anchor.dataset import CUBirds, SOP, Cars
+from proxy_anchor.dataset.Inshop import Inshop_Dataset
 from hyptorch.pmath import dist_matrix
 from model import init_model
 
 
 class Config(Tap):
     path: str = "/home/i"
-    ds: Literal["SOP", "CUB"] = "SOP"
+    ds: Literal["SOP", "CUB", "Cars", "Inshop"] = "SOP"
     num_samples: int = 2
-    bs: int = 400  # per GPU
-    lr: float = 1e-5
-    t: float = 0.3
+    bs: int = 900  # per GPU
+    lr: float = 3e-5
+    t: float = 0.2
     emb: int = 128
-    freeze: int = None
-    ep: int = 10
+    freeze: int = 0
+    ep: int = 100
     hyp_c: float = 0.1
-    eval_ep: int = 10
+    eval_ep: List[int] = [100]
     model: str = "dino_vits16"
     save_emb: bool = False
     emb_name: str = "emb"
-    clip_grad: bool = False
     local_rank: int = 0
 
 
@@ -89,8 +90,9 @@ if __name__ == "__main__":
         ]
     )
 
-    ds_f = {"CUB": CUBirds, "SOP": SOP}
-    ds_train = ds_f[cfg.ds](cfg.path, "train", train_tr)
+    ds_list = {"CUB": CUBirds, "SOP": SOP, "Cars": Cars, "Inshop": Inshop_Dataset}
+    ds_class = ds_list[cfg.ds]
+    ds_train = ds_class(cfg.path, "train", train_tr)
     assert len(ds_train.ys) * cfg.num_samples >= cfg.bs * world_size
     sampler = UniqueClassSempler(
         ds_train.ys, cfg.num_samples, cfg.local_rank, world_size
@@ -106,15 +108,15 @@ if __name__ == "__main__":
 
     model = init_model(cfg)
     optimizer = optim.AdamW(model.parameters(), lr=cfg.lr)
-    model, optimizer = amp.initialize(model, optimizer, opt_level="O2", loss_scale=16.0)
+    model, optimizer = amp.initialize(model, optimizer, opt_level="O2")
     if world_size > 1:
         model = DistributedDataParallel(model, delay_allreduce=True)
 
     loss_f = partial(contrastive_loss, tau=cfg.t, hyp_c=cfg.hyp_c)
-    eval_f = partial(
+    get_emb_f = partial(
         get_emb,
         model=model,
-        ds=ds_f[cfg.ds],
+        ds=ds_class,
         path=cfg.path,
         mean_std=mean_std,
         world_size=world_size,
@@ -149,27 +151,23 @@ if __name__ == "__main__":
             optimizer.zero_grad()
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
-            if cfg.clip_grad:
-                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 3)
+            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 5)
             optimizer.step()
 
-        if (ep + 1) % cfg.eval_ep == 0:
-            eval_head = eval_f()
-            eval_body = eval_f(skip_head=True)
+        if (ep + 1) in cfg.eval_ep:
+            rh, rb = evaluate(get_emb_f, cfg.ds, cfg.hyp_c)
 
         if cfg.local_rank == 0:
             stats_ep = {k: np.mean([x[k] for x in stats_ep]) for k in stats_ep[0]}
-            if (ep + 1) % cfg.eval_ep == 0:
-                recall_head = get_recall(*eval_head, cfg.ds, cfg.hyp_c)
-                recall_body = get_recall(*eval_body, cfg.ds, 0)
-                stats_ep = {"recall": recall_head, "recall_b": recall_body, **stats_ep}
+            if (ep + 1) in cfg.eval_ep:
+                stats_ep = {"recall": rh, "recall_b": rb, **stats_ep}
             wandb.log({**stats_ep, "ep": ep})
 
     if cfg.save_emb:
-        x, y = eval_f()
+        x, y = get_emb_f()
         x, y = x.float().cpu(), y.long().cpu()
         torch.save((x, y), cfg.path + "/" + cfg.emb_name + "_eval.pt")
 
-        x, y = eval_f(ds_type="train")
+        x, y = get_emb_f(ds_type="train")
         x, y = x.float().cpu(), y.long().cpu()
         torch.save((x, y), cfg.path + "/" + cfg.emb_name + "_train.pt")
