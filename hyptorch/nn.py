@@ -117,9 +117,10 @@ class ToPoincare(nn.Module):
     r"""
     Module which maps points in n-dim Euclidean space
     to n-dim Poincare ball
+    Also implements clipping from https://arxiv.org/pdf/2107.11472.pdf
     """
 
-    def __init__(self, c, train_c=False, train_x=False, ball_dim=None, riemannian=True):
+    def __init__(self, c, train_c=False, train_x=False, ball_dim=None, riemannian=True, clip_r=None):
         super(ToPoincare, self).__init__()
         if train_x:
             if ball_dim is None:
@@ -141,14 +142,23 @@ class ToPoincare(nn.Module):
 
         self.riemannian = pmath.RiemannianGradient
         self.riemannian.c = c
-
+        
+        self.clip_r = clip_r
+        
         if riemannian:
             self.grad_fix = lambda x: self.riemannian.apply(x)
         else:
             self.grad_fix = lambda x: x
 
     def forward(self, x):
-
+        if self.clip_r is not None:
+            x_norm = torch.norm(x, dim=-1, keepdim=True) + 1e-5
+            fac =  torch.minimum(
+                torch.ones_like(x_norm), 
+                self.clip_r / x_norm
+            )
+            x = x * fac
+            
         if self.train_x:
             xp = pmath.project(pmath.expmap0(self.xp, c=self.c), c=self.c)
             return self.grad_fix(pmath.project(pmath.expmap(xp, x, c=self.c), c=self.c))
@@ -195,3 +205,5 @@ class FromPoincare(nn.Module):
 
     def extra_repr(self):
         return "train_c={}, train_x={}".format(self.train_c, self.train_x)
+    
+    
