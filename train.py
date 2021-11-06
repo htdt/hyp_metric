@@ -15,7 +15,6 @@ from functools import partial
 import numpy as np
 import PIL
 from tap import Tap
-from typing import List
 from typing_extensions import Literal
 
 from sampler import UniqueClassSempler
@@ -31,16 +30,17 @@ class Config(Tap):
     ds: Literal["SOP", "CUB", "Cars", "Inshop"] = "SOP"
     num_samples: int = 2
     bs: int = 900  # per GPU
-    lr: float = 3e-5
+    lr: float = 1e-5
     t: float = 0.2
     emb: int = 128
     freeze: int = 0
     ep: int = 100
     hyp_c: float = 0.1
-    eval_ep: List[int] = [100]
+    eval_ep: str = "[100]"  # r(100,200,20) parsed as range (100,200) with step 20
     model: str = "dino_vits16"
     save_emb: bool = False
     emb_name: str = "emb"
+    clip_r: float = 2.3
     local_rank: int = 0
 
 
@@ -121,6 +121,7 @@ if __name__ == "__main__":
         mean_std=mean_std,
         world_size=world_size,
     )
+    eval_ep = eval(cfg.eval_ep.replace("r", "list(range").replace(")", "))"))
 
     cudnn.benchmark = True
     for ep in trange(cfg.ep):
@@ -151,15 +152,15 @@ if __name__ == "__main__":
             optimizer.zero_grad()
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
-            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 5)
+            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 3)
             optimizer.step()
 
-        if (ep + 1) in cfg.eval_ep:
+        if (ep + 1) in eval_ep:
             rh, rb = evaluate(get_emb_f, cfg.ds, cfg.hyp_c)
 
         if cfg.local_rank == 0:
             stats_ep = {k: np.mean([x[k] for x in stats_ep]) for k in stats_ep[0]}
-            if (ep + 1) in cfg.eval_ep:
+            if (ep + 1) in eval_ep:
                 stats_ep = {"recall": rh, "recall_b": rb, **stats_ep}
             wandb.log({**stats_ep, "ep": ep})
 

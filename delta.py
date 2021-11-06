@@ -26,11 +26,6 @@ def delta_hyp(dismat):
     return (maxmin - XY_p).max()
 
 
-def calculate_c(delta, diam):
-    rel_delta = (2 * delta) / diam
-    return (0.144 / rel_delta) ** 2
-
-
 if __name__ == "__main__":
     cfg: Config = Config().parse_args()
     ds_list = {"CUB": CUBirds, "SOP": SOP, "Cars": Cars, "Inshop": Inshop_Dataset}
@@ -42,14 +37,17 @@ if __name__ == "__main__":
     model = init_model(cfg)
     model.head = torch.nn.Identity()
     emb = get_emb(model, ds, cfg.path, mean_std, "train", 1)[0]
-    print(len(emb))
+    assert len(emb) > 2000
 
-    c_list = []
+    result = []
     for i in range(100):
         idx = torch.randperm(len(emb))[:2000]
         emb_cur = emb[idx]
         dists = torch.cdist(emb_cur, emb_cur)
-        delta = delta_hyp(dists).item()
-        diam = dists.max().item()
-        c_list.append(calculate_c(delta, diam))
-    print(sum(c_list) / len(c_list))
+        delta = delta_hyp(dists)
+        diam = dists.max()
+        rel_delta = (2 * delta) / diam
+        result.append(rel_delta)
+    rel_delta_mean = torch.tensor(result).mean().item()
+    c = (0.144 / rel_delta_mean) ** 2
+    print(f"δ = {rel_delta_mean:.3f}, c = {c:.3f}")

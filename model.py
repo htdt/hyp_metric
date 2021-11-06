@@ -11,7 +11,12 @@ def init_model(cfg):
     else:
         body = timm.create_model(cfg.model, pretrained=True)
     if cfg.hyp_c > 0:
-        last = hypnn.ToPoincare(c=cfg.hyp_c, ball_dim=cfg.emb, riemannian=False)
+        last = hypnn.ToPoincare(
+            c=cfg.hyp_c,
+            ball_dim=cfg.emb,
+            riemannian=False,
+            clip_r=cfg.clip_r if cfg.clip_r > 0 else None,
+        )
     else:
         last = NormLayer()
     bdim = 2048 if cfg.model == "resnet50" else 384
