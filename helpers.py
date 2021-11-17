@@ -77,11 +77,21 @@ def get_recall_inshop(xq, yq, xg, yg, hyp_c):
     return recall[0]
 
 
-def get_emb(model, ds, path, mean_std, ds_type="eval", world_size=1, skip_head=False):
+def get_emb(
+    model,
+    ds,
+    path,
+    mean_std,
+    resize=224,
+    crop=224,
+    ds_type="eval",
+    world_size=1,
+    skip_head=False,
+):
     eval_tr = T.Compose(
         [
-            T.Resize(224, interpolation=PIL.Image.BICUBIC),
-            T.CenterCrop(224),
+            T.Resize(resize, interpolation=PIL.Image.BICUBIC),
+            T.CenterCrop(crop),
             T.ToTensor(),
             T.Normalize(*mean_std),
         ]

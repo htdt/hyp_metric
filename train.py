@@ -42,6 +42,8 @@ class Config(Tap):
     emb_name: str = "emb"
     clip_r: float = 2.3
     local_rank: int = 0
+    resize: int = 224
+    crop: int = 224
 
 
 def contrastive_loss(x0, x1, tau, hyp_c):
@@ -83,7 +85,9 @@ if __name__ == "__main__":
         mean_std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
     train_tr = T.Compose(
         [
-            T.RandomResizedCrop(224, scale=(0.2, 1.0), interpolation=PIL.Image.BICUBIC),
+            T.RandomResizedCrop(
+                cfg.crop, scale=(0.2, 1.0), interpolation=PIL.Image.BICUBIC
+            ),
             T.RandomHorizontalFlip(),
             T.ToTensor(),
             T.Normalize(*mean_std),
@@ -120,6 +124,8 @@ if __name__ == "__main__":
         path=cfg.path,
         mean_std=mean_std,
         world_size=world_size,
+        resize=cfg.resize,
+        crop=cfg.crop,
     )
     eval_ep = eval(cfg.eval_ep.replace("r", "list(range").replace(")", "))"))
 
@@ -165,7 +171,8 @@ if __name__ == "__main__":
             wandb.log({**stats_ep, "ep": ep})
 
     if cfg.save_emb:
-        x, y = get_emb_f()
+        ds_type = "gallery" if cfg.ds == "Inshop" else "eval"
+        x, y = get_emb_f(ds_type=ds_type)
         x, y = x.float().cpu(), y.long().cpu()
         torch.save((x, y), cfg.path + "/" + cfg.emb_name + "_eval.pt")
 

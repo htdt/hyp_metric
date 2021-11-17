@@ -1,6 +1,22 @@
+## Info
+Code includes 
+- https://github.com/tjddus9597/Proxy-Anchor-CVPR2020 for datasets and evaluation
+- https://github.com/leymir/hyperbolic-image-embeddings for hyperbolic operations
+First repo uses `pytorch_metric_learning`.
+
+- `train.py` - main training;
+- `eval_pretrain.py` - encoder evaluation without training;
+- `delta.py` - δ-hyperbolicity evaluation.
+
 ## Run
 ```
-python -m torch.distributed.launch --nproc_per_node=4 train.py
+python -m torch.distributed.launch --nproc_per_node=4 train.py  # multi GPU
+python -m train  # single GPU
+```
+
+## Configs
+```
+
 ```
 
 ## Setup
