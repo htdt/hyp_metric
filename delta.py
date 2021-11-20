@@ -8,13 +8,9 @@ from model import init_model
 
 
 class Config(Tap):
-    path: str = "/home/i"
-    ds: Literal["SOP", "CUB", "Cars", "Inshop"] = "SOP"
-    emb: int = 128
-    hyp_c: float = 0.1
-    model: str = "dino_vits16"
-    clip_r: int = None
-    freeze: int = None
+    path: str = "/home/i"  # path to dataset
+    ds: Literal["SOP", "CUB", "Cars", "Inshop"] = "SOP"  # dataset name
+    model: str = "dino_vits16"  # model name (see train.py)
 
 
 def delta_hyp(dismat):

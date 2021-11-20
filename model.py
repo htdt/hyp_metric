@@ -6,26 +6,27 @@ import hyptorch.nn as hypnn
 
 
 def init_model(cfg):
-    if cfg.model.startswith("dino"):
-        body = torch.hub.load("facebookresearch/dino:main", cfg.model)
+    cfg = cfg.as_dict()
+    if cfg["model"].startswith("dino"):
+        body = torch.hub.load("facebookresearch/dino:main", cfg["model"])
     else:
-        body = timm.create_model(cfg.model, pretrained=True)
-    if cfg.hyp_c > 0:
+        body = timm.create_model(cfg["model"], pretrained=True)
+    if cfg.get("hyp_c", 0) > 0:
         last = hypnn.ToPoincare(
-            c=cfg.hyp_c,
-            ball_dim=cfg.emb,
+            c=cfg["hyp_c"],
+            ball_dim=cfg.get("emb", 128),
             riemannian=False,
-            clip_r=cfg.clip_r if cfg.clip_r > 0 else None,
+            clip_r=cfg.get("clip_r", None),
         )
     else:
         last = NormLayer()
-    bdim = 2048 if cfg.model == "resnet50" else 384
-    head = nn.Sequential(nn.Linear(bdim, cfg.emb), last)
+    bdim = 2048 if cfg["model"] == "resnet50" else 384
+    head = nn.Sequential(nn.Linear(bdim, cfg.get("emb", 128)), last)
     nn.init.constant_(head[0].bias.data, 0)
     nn.init.orthogonal_(head[0].weight.data)
     rm_head(body)
-    if cfg.freeze is not None:
-        freeze(body, cfg.freeze)
+    if cfg.get("freeze", None) is not None:
+        freeze(body, cfg["freeze"])
     model = HeadSwitch(body, head)
     model.cuda().train()
     return model
