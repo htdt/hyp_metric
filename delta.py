@@ -32,7 +32,14 @@ if __name__ == "__main__":
         mean_std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
     model = init_model(cfg)
     model.head = torch.nn.Identity()
-    emb = get_emb(model, ds, cfg.path, mean_std, "train", 1)[0]
+    emb = get_emb(
+        model=model,
+        ds=ds,
+        path=cfg.path,
+        mean_std=mean_std,
+        world_size=1,
+        ds_type="train",
+    )[0]
     assert len(emb) > 2000
 
     result = []

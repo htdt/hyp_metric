@@ -25,23 +25,20 @@ from hyptorch.pmath import dist_matrix
 from model import init_model
 
 
+# flake8: noqa: E501
 class Config(Tap):
     path: str = "/home/i"  # path to datasets
     ds: Literal["SOP", "CUB", "Cars", "Inshop"] = "SOP"  # dataset name
     num_samples: int = 2  # how many samples per each category in batch
-    bs: int = 900  # batch size per GPU, e.g. --num_samples 3 --bs 900 means
-    """each iteration we sample 300 categories with 3 samples"""
+    bs: int = 900  # batch size per GPU, e.g. --num_samples 3 --bs 900 means each iteration we sample 300 categories with 3 samples
     lr: float = 1e-5  # learning rate
     t: float = 0.2  # cross-entropy temperature
     emb: int = 128  # output embedding size
-    freeze: int = 0  # number of blocks in transformer to freeze,
-    """None - freeze nothing, 0 - freeze only patch_embed"""
+    freeze: int = 0  # number of blocks in transformer to freeze, None - freeze nothing, 0 - freeze only patch_embed
     ep: int = 100  # number of epochs
     hyp_c: float = 0.1  # hyperbolic c, "0" enables sphere mode
-    eval_ep: str = "[100]"  # epochs for evaluation, [] or range "r(start,end,step)"
-    """ "r(10,100,20)+[200]" means 10, 30, 50, 70, 90, 200"""
-    model: str = "dino_vits16"  # model name from timm or torch.hub, i.e.
-    """deit_small_distilled_patch16_224, vit_small_patch16_224, dino_vits16"""
+    eval_ep: str = "[100]"  # epochs for evaluation, [] or range "r(start,end,step)", e.g. "r(10,70,20)+[200]" means 10, 30, 50, 200"""
+    model: str = "dino_vits16"  # model name from timm or torch.hub, i.e. deit_small_distilled_patch16_224, vit_small_patch16_224, dino_vits16
     save_emb: bool = False  # save embeddings of the dataset after training
     emb_name: str = "emb"  # filename for embeddings
     clip_r: float = 2.3  # feature clipping radius
